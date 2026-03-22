@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+*.mp4
+*.mkv
+*.mov
+*.avi
+*.mp3
+*.wav
+*.flac
