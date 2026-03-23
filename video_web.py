@@ -186,7 +186,7 @@ def _run_one_ffmpeg(input_path, params, out_dir, idx, total):
     info     = get_video_info(input_path)
     duration = info.get("duration",0) or 1.0
     try:
-        current_proc = subprocess.Popen(cmd, stderr=subprocess.PIPE, universal_newlines=True, bufsize=1)
+        current_proc = subprocess.Popen(cmd, stderr=subprocess.PIPE, encoding="utf-8", errors="replace", bufsize=1)
         for line in current_proc.stderr:
             with job_lock:
                 if not job_state["running"]: current_proc.terminate(); break
@@ -289,6 +289,9 @@ def run_transcribe_batch(files, model_name, language, with_ts, out_dir):
     batch_script = r"""
 import whisper, json, sys, subprocess, os, tempfile
 
+sys.stdout.reconfigure(encoding="utf-8")
+sys.stderr.reconfigure(encoding="utf-8")
+
 cfg      = json.loads(sys.argv[1])
 model    = whisper.load_model(cfg["model"])
 lang     = cfg["language"]  # None 或具体语言代码
@@ -306,7 +309,7 @@ for item in files:
         # 提取 16kHz mono WAV（whisper 最优输入格式）
         subprocess.run(
             ["ffmpeg","-y","-i",path,"-vn","-ar","16000","-ac","1","-c:a","pcm_s16le",tmp],
-            capture_output=True
+            capture_output=True, encoding="utf-8", errors="replace"
         )
         result = model.transcribe(tmp, language=lang, verbose=True, fp16=False)
         out = {
@@ -353,7 +356,7 @@ print("__ALL_DONE__", flush=True)
         tr_proc = subprocess.Popen(
             [sys.executable, "-c", batch_script, cfg_data],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            universal_newlines=True, bufsize=1
+            encoding="utf-8", errors="replace", bufsize=1
         )
 
         cur_idx      = -1
