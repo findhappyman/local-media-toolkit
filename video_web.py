@@ -14,6 +14,16 @@ from urllib.parse import urlparse, parse_qs
 import tkinter as tk
 from tkinter import filedialog
 
+# ── 修复 Windows 子进程 PATH（用户级环境变量不自动继承）────────────────────────
+if sys.platform == "win32":
+    import winreg
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Environment") as k:
+            user_path, _ = winreg.QueryValueEx(k, "Path")
+        os.environ["PATH"] = os.environ.get("PATH", "") + os.pathsep + user_path
+    except Exception:
+        pass
+
 # ── 全局状态 ─────────────────────────────────────────────────────────────────
 dialog_req = queue.Queue()
 dialog_res = queue.Queue()
