@@ -396,6 +396,7 @@ print("__ALL_DONE__", flush=True)
                                 "status": "done", "progress": 100,
                                 "text": text, "segments": segs, "saved": saved,
                             })
+                            tr_state["cur_text"] = text  # 实时视图同步最终完整文本
                             tr_state["done_count"] += 1
                             tr_state["overall_pct"] = int(tr_state["done_count"] / len(files) * 100)
                     except Exception as e:
@@ -1211,10 +1212,19 @@ async function pollTr() {
     })
     rebuildViewSelect(d.queue)
     lastTrQueue = d.queue
-    if (trViewIdx === -1 && d.cur_text) {
-      document.getElementById('transcriptBox').textContent = d.cur_text
+    const box = document.getElementById('transcriptBox')
+    if (trViewIdx === -1) {
+      // 实时模式：优先 cur_text，回退到当前处理文件的 text
+      let txt = d.cur_text || ''
+      if (!txt && d.cur_idx >= 0 && d.queue[d.cur_idx]) {
+        txt = d.queue[d.cur_idx].text || ''
+      }
+      if (txt && box.textContent !== txt) {
+        box.textContent = txt
+        box.scrollTop = box.scrollHeight
+      }
     } else if (trViewIdx >= 0 && d.queue[trViewIdx]) {
-      document.getElementById('transcriptBox').textContent = d.queue[trViewIdx].text || ''
+      box.textContent = d.queue[trViewIdx].text || ''
     }
   }
   if (!d.running) {

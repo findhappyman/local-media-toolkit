@@ -9,3 +9,7 @@ __pycache__/
 *.mp3
 *.wav
 *.flac
+build/
+dist/
+__pycache__/
+*.spec
