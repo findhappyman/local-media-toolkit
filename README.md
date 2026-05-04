@@ -18,8 +18,7 @@
 
 ## 版本
 
-- **`video_web.py`** — Web 版（推荐）：浏览器界面，本地 HTTP 服务器
-- **`video_compressor.py`** — 桌面版：原生 Tkinter GUI
+- **`video_web.py`** — Web 版：浏览器界面，本地 HTTP 服务器
 
 ## 安装
 
@@ -39,6 +38,14 @@ python3 video_web.py
 ```
 
 自动在浏览器打开 `http://127.0.0.1:9527`，按 `Ctrl+C` 退出。
+
+## 打包
+
+```bash
+pyinstaller video_web.spec
+```
+
+打包后的 `VideoToolkit.app` 仍然运行本地 Web 服务，并只打开一次浏览器页面。转文稿会调用系统 Python，避免 PyInstaller 打包后子进程重复启动 `.app`。
 
 ## 支持的文件格式
 

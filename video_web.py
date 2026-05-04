@@ -6,13 +6,38 @@
 转文稿额外依赖：pip install openai-whisper
 """
 
-import json, os, re, subprocess, sys, threading, webbrowser, queue, time, tempfile
-from http.server import BaseHTTPRequestHandler, HTTPServer
+import json, os, re, socket, subprocess, sys, threading, webbrowser, queue, time, tempfile
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 
 import tkinter as tk
 from tkinter import filedialog
+
+APP_HOST = "127.0.0.1"
+APP_PORT = 9527
+APP_URL = f"http://{APP_HOST}:{APP_PORT}"
+
+def _get_python():
+    """打包后返回系统 Python，避免子进程再次启动 .app。"""
+    if getattr(sys, "frozen", False):
+        import shutil
+        py = shutil.which("python3") or shutil.which("python")
+        if py:
+            return py
+        raise RuntimeError("找不到 Python 解释器，请确认系统已安装 Python 3")
+    return sys.executable
+
+def _is_server_running():
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.settimeout(0.2)
+        return s.connect_ex((APP_HOST, APP_PORT)) == 0
+
+def _open_browser_once():
+    if sys.platform == "darwin":
+        subprocess.Popen(["open", APP_URL])
+    else:
+        webbrowser.open(APP_URL)
 
 # ── 修复 Windows 子进程 PATH（用户级环境变量不自动继承）────────────────────────
 if sys.platform == "win32":
@@ -93,18 +118,24 @@ def get_video_info(path):
     except Exception as e:
         return {"error": str(e)}
 
-def check_whisper():
-    """检测 whisper 是否可用"""
+def check_whisper_detail():
+    """检测 whisper 是否可用，返回错误原因用于界面提示。"""
     try:
         r = subprocess.run(
-            [sys.executable, "-c", "import whisper; print(whisper.__version__)"],
+            [_get_python(), "-c", "import whisper; print(whisper.__version__)"],
             capture_output=True, text=True, timeout=10
         )
         if r.returncode == 0:
-            return True, r.stdout.strip()
-        return False, ""
-    except Exception:
-        return False, ""
+            return True, r.stdout.strip(), ""
+        err = (r.stderr or r.stdout).strip()
+        return False, "", err or f"Python 返回码 {r.returncode}"
+    except Exception as e:
+        return False, "", str(e)
+
+def check_whisper():
+    """兼容旧调用：只返回是否可用与版本。"""
+    ok, ver, _ = check_whisper_detail()
+    return ok, ver
 
 def build_ffmpeg_cmd(params, input_path, output_path):
     mode = params.get("mode","compress")
@@ -161,6 +192,7 @@ def build_ffmpeg_cmd(params, input_path, output_path):
     elif mode == "scale":
         res = params.get("scale_res","1280x720").split()[0]
         cmd += ["-vf",f"scale={res}","-c:a","copy"]
+        output_path = str(Path(output_path).with_suffix(Path(input_path).suffix or ".mp4"))
 
     cmd.append(output_path)
     return cmd, output_path
@@ -213,7 +245,8 @@ def _run_one_ffmpeg(input_path, params, out_dir, idx, total):
             orig  = os.path.getsize(input_path)
             final = os.path.getsize(out_path) if os.path.exists(out_path) else 0
             ratio = (1-final/orig)*100 if orig > 0 else 0
-            result = f"{human_size(orig)} → {human_size(final)}  压缩 {ratio:.1f}%\n保存: {out_path}"
+            label = "压缩" if mode == "compress" else "体积变化"
+            result = f"{human_size(orig)} → {human_size(final)}  {label} {ratio:.1f}%\n保存: {out_path}"
             with job_lock:
                 job_state["queue"][idx].update({"status":"done","progress":100,"result":result})
             return True, result
@@ -248,7 +281,12 @@ def run_job_batch(files, params, out_dir):
                 job_state["overall_pct"] = int(job_state["done_count"]/len(files)*100)
         with job_lock:
             done = sum(1 for q in job_state["queue"] if q["status"]=="done")
-            job_state["status"] = f"✅ 完成（{done}/{len(files)} 个文件）"
+            if done == len(files):
+                job_state["status"] = f"✅ 全部完成（{done}/{len(files)} 个文件）"
+            elif done:
+                job_state["status"] = f"⚠️ 部分完成（{done}/{len(files)} 个文件）"
+            else:
+                job_state["status"] = f"❌ 全部失败（0/{len(files)} 个文件）"
             job_state["overall_pct"] = 100
     except Exception as e:
         with job_lock: job_state["status"] = f"❌ 错误：{e}"
@@ -354,7 +392,7 @@ print("__ALL_DONE__", flush=True)
 
     try:
         tr_proc = subprocess.Popen(
-            [sys.executable, "-c", batch_script, cfg_data],
+            [_get_python(), "-c", batch_script, cfg_data],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             encoding="utf-8", errors="replace", bufsize=1
         )
@@ -451,6 +489,17 @@ print("__ALL_DONE__", flush=True)
 
         tr_proc.wait()
         t_out.join(timeout=5)
+        if tr_proc.returncode != 0:
+            err = (tr_proc.stderr.read() if tr_proc.stderr else "").strip()
+            with tr_lock:
+                tr_state["status"] = "❌ Whisper 启动失败"
+                tr_state["log"] += (("\n" + err) if err else f"\nWhisper 子进程返回码 {tr_proc.returncode}")
+                for q in tr_state["queue"]:
+                    if q["status"] in ("pending", "processing"):
+                        q["status"] = "error"
+                        q["error"] = err or f"Whisper 子进程返回码 {tr_proc.returncode}"
+                tr_state["done_count"] = sum(1 for q in tr_state["queue"] if q["status"] in ("done", "error"))
+                tr_state["overall_pct"] = 100 if tr_state["queue"] else 0
 
     except Exception as e:
         with tr_lock:
@@ -527,9 +576,9 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"ok":True})
 
         elif path == "/check_whisper":
-            ok, ver = check_whisper()
+            ok, ver, err = check_whisper_detail()
             with tr_lock: tr_state["whisper_ok"] = ok
-            self._json({"ok":ok,"version":ver})
+            self._json({"ok":ok,"version":ver,"error":err})
 
         elif path == "/tr_status":
             with tr_lock: self._json(dict(tr_state))
@@ -583,6 +632,23 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"error": f"文件不存在：{bad[0]}"},400); return
             if not files:
                 self._json({"error":"请提供至少一个文件"},400); return
+            ok, ver, err = check_whisper_detail()
+            if not ok:
+                with tr_lock:
+                    tr_state["whisper_ok"] = False
+                    tr_state["running"] = False
+                    tr_state["status"] = "❌ Whisper 不可用"
+                    tr_state["log"] = err
+                    tr_state["queue"] = []
+                    tr_state["total"] = 0
+                    tr_state["done_count"] = 0
+                    tr_state["overall_pct"] = 0
+                    tr_state["cur_idx"] = -1
+                    tr_state["cur_pct"] = 0
+                    tr_state["cur_text"] = ""
+                self._json({"error": "Whisper 不可用", "detail": err}, 503); return
+            with tr_lock:
+                tr_state["whisper_ok"] = True
             with tr_lock:
                 if tr_state["running"]:
                     self._json({"error":"转写任务正在运行"},409); return
@@ -1354,20 +1420,27 @@ function esc(s) {
 
 # ── 主线程：tkinter 对话框 ────────────────────────────────────────────────────
 def start_server():
-    server = HTTPServer(("127.0.0.1", 9527), Handler)
-    print("✅  服务器已启动：http://127.0.0.1:9527")
+    server = ThreadingHTTPServer((APP_HOST, APP_PORT), Handler)
+    server.daemon_threads = True
+    print(f"✅  服务器已启动：{APP_URL}")
     server.serve_forever()
 
 def main():
+    if _is_server_running():
+        _open_browser_once()
+        print(f"🌐  已打开已有服务：{APP_URL}")
+        return
+
     threading.Thread(target=start_server, daemon=True).start()
-    time.sleep(0.4)
-    webbrowser.open("http://127.0.0.1:9527")
+    time.sleep(0.8)
+    _open_browser_once()
     print("🌐  已在浏览器中打开，按 Ctrl+C 退出\n")
     print("📝  转文稿功能需要 Whisper：")
     print("    pip install openai-whisper\n")
 
     root = tk.Tk()
-    root.withdraw()                     # 始终隐藏根窗口，不再 deiconify/withdraw
+    root.withdraw()                     # 隐藏根窗口
+    root.wm_attributes('-alpha', 0.0)  # 完全透明，防止 macOS 上短暂显示
 
     # 文件类型定义
     VIDEO_TYPES = [
@@ -1386,9 +1459,6 @@ def main():
     def tk_loop():
         try:
             req = dialog_req.get_nowait()
-            # macOS：对话框前让 Tk 刷新一次，确保对话框能正常弹出
-            root.attributes("-topmost", True)
-            root.update()
 
             if req == "file":
                 result = filedialog.askopenfilename(
@@ -1413,7 +1483,7 @@ def main():
                 )
                 dialog_res.put(result or "")
 
-            root.attributes("-topmost", False)
+            root.withdraw()  # 确保对话框关闭后根窗口保持隐藏
 
         except queue.Empty:
             pass

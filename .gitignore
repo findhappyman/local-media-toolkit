@@ -13,3 +13,4 @@ build/
 dist/
 __pycache__/
 *.spec
+!video_web.spec
